@@ -147,13 +147,13 @@ private:
 
 
 
-void UserThreadWebsocketCallbacks::dispatchData(const char* data, std::size_t size) {
+inline void UserThreadWebsocketCallbacks::dispatchData(const char* data, std::size_t size) {
     auto index = data_queue_.reserve(size);
     std::memcpy(data_queue_[index], data, size);
     data_queue_.publish(index, size);
 }
 
-void UserThreadWebsocketCallbacks::processData() {
+inline void UserThreadWebsocketCallbacks::processData() {
     auto [data_ptr, data_size] = data_queue_.read(read_cursor_);
     if (data_ptr && data_size > 0) {
         client_->processData(data_ptr, data_size);
