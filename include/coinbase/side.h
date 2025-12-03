@@ -10,7 +10,7 @@ enum class Side : uint8_t {
 };
 
 inline Side to_side(std::string_view s) {
-    return s == "BUY" ? Side::BUY : Side::SELL; 
+    return (s == "BUY" || s == "bid") ? Side::BUY : Side::SELL; 
 }
 
 inline std::string to_string(Side s) {
