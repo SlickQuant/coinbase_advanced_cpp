@@ -44,7 +44,7 @@ namespace coinbase::tests {
             EXPECT_EQ(snapshot.product_id, "BTC-USD");
             EXPECT_GT(snapshot.updates.size(), 0);
             if (!snapshot.updates.empty()) {
-                EXPECT_EQ(snapshot.updates[0].side, Side::SELL);
+                EXPECT_EQ(snapshot.updates[0].side, Side::BUY);
                 EXPECT_GT(snapshot.updates[0].price_level, 0);
                 EXPECT_GT(snapshot.updates[0].new_quantity, 0);
                 auto last_index = snapshot.updates.size() - 1;

@@ -87,7 +87,7 @@ struct UserThreadWebsocketCallbacks : public WebsocketCallbacks
     ~UserThreadWebsocketCallbacks() override = default;
     
     // Displatch data to the user thread
-    void dispatchData(const char* data, std::size_t size);
+    void dispatchData(const char* data, std::size_t size, char channel);
 
     // Process data in the user thread. Callbacks will be invoked in the user thread.
     void processData();
@@ -112,8 +112,10 @@ public:
     void unsubscribe(const std::vector<std::string> &product_ids, const std::vector<WebSocketChannel> &channels);
 
 private:
-    void onData(const char* data, std::size_t size);
-    void processData(const char* data, std::size_t size);
+    void onMarketData(const char* data, std::size_t size);
+    void onUserData(const char* data, std::size_t size);
+    void processMarketData(const char* data, std::size_t size);
+    void processUserData(const char* data, std::size_t size);
     void onMarketDataError(std::string err);
     void onUserDataError(std::string err);
     void checkMarketDataSequenceNumber(int64_t seq_num);
@@ -147,16 +149,25 @@ private:
 
 
 
-inline void UserThreadWebsocketCallbacks::dispatchData(const char* data, std::size_t size) {
-    auto index = data_queue_.reserve(size);
-    std::memcpy(data_queue_[index], data, size);
-    data_queue_.publish(index, size);
+inline void UserThreadWebsocketCallbacks::dispatchData(const char* data, std::size_t size, char channel) {
+    auto sz = size + 1;
+    auto index = data_queue_.reserve(sz);
+    *data_queue_[index] = channel;
+    std::memcpy(data_queue_[index + 1], data, size);
+    data_queue_.publish(index, sz);
 }
 
 inline void UserThreadWebsocketCallbacks::processData() {
     auto [data_ptr, data_size] = data_queue_.read(read_cursor_);
     if (data_ptr && data_size > 0) {
-        client_->processData(data_ptr, data_size);
+        char channel = data_ptr[0];
+        ++data_ptr;
+        if (channel == 'U') {
+            client_->processUserData(data_ptr, data_size - 1);
+        }
+        else {
+            client_->processMarketData(data_ptr, data_size - 1);
+        }
     }
 }
 
@@ -172,13 +183,13 @@ inline WebSocketClient::WebSocketClient(
         market_data_url_,
         [this]() { LOG_INFO("Market data connected"); },
         [this]() { LOG_INFO("Market data disconnected"); },
-        [this](const char* data, std::size_t size) { onData(data, size); },
+        [this](const char* data, std::size_t size) { onMarketData(data, size); },
         [this](std::string err) { onMarketDataError(err); }))
     , user_data_websocket_(std::make_shared<Websocket>(
         user_data_url_, 
         [this]() { LOG_INFO("User data connected"); },
         [this]() { LOG_INFO("User data disconnected"); },
-        [this](const char* data, std::size_t size) { onData(data, size); },
+        [this](const char* data, std::size_t size) { onUserData(data, size); },
         [this](std::string err) { onUserDataError(err); }))
     , user_thread_callbacks_(dynamic_cast<UserThreadWebsocketCallbacks*>(callbacks))
 {
@@ -243,61 +254,73 @@ inline void WebSocketClient::unsubscribe(const std::vector<std::string> &product
     }
 }
 
-inline void WebSocketClient::onData(const char* data, std::size_t size) {
+inline void WebSocketClient::onMarketData(const char* data, std::size_t size) {
     if (user_thread_callbacks_) {
-        user_thread_callbacks_->dispatchData(data, size);
+        user_thread_callbacks_->dispatchData(data, size, 'M');
     }
     else {
-        processData(data, size);
+        processMarketData(data, size);
     }
 }
 
-inline void WebSocketClient::processData(const char* data, std::size_t size) {
+inline void WebSocketClient::onUserData(const char* data, std::size_t size) {
+    if (user_thread_callbacks_) {
+        user_thread_callbacks_->dispatchData(data, size, 'U');
+    }
+    else {
+        processUserData(data, size);
+    }
+}
+
+inline void WebSocketClient::processMarketData(const char* data, std::size_t size) {
     try {
         auto j = json::parse(data, data + size);
+        checkMarketDataSequenceNumber(j["sequence_num"]);
         auto channel = j["channel"];
         if (channel == "l2_data") {
-            checkMarketDataSequenceNumber(j["sequence_num"]);
             processLevel2Update(j);
         }
         else if (channel == "ticker" || channel == "ticker_batch") {
-            checkMarketDataSequenceNumber(j["sequence_num"]);
             processTicker(j);
         }
         else if (channel == "market_trades") {
-            checkMarketDataSequenceNumber(j["sequence_num"]);
             processMarketTrades(j);
         }
         else if (channel == "candles") {
-            checkMarketDataSequenceNumber(j["sequence_num"]);
             processCandles(j);
         }
         else if (channel == "status") {
-            checkMarketDataSequenceNumber(j["sequence_num"]);
             processStatus(j);
         }
-        else if (channel == "user") {
-            checkUserDataSequenceNumber(j["sequence_num"].get<uint64_t>());
+        else if (channel == "subscriptions") {
+        }
+        else if (channel == "heartbeat") {
+            processHeartbeat(j);
+        }
+        else {
+            LOG_ERROR("unknown channel: {}", to_string(channel));
+        }
+    }
+    catch (const std::exception &e) {
+        LOG_ERROR("error: {}. data: {}", e.what(), std::string_view(data, size));
+    }
+}
+
+inline void WebSocketClient::processUserData(const char* data, std::size_t size) {
+    try {
+        auto j = json::parse(data, data + size);
+        checkUserDataSequenceNumber(j["sequence_num"]);
+
+        auto channel = j["channel"];
+        if (channel == "user") {
             processUserEvent(j);
         }
         else if (channel == "subscriptions") {
-            for (auto &event : j["events"]) {
-                auto &subscriptions = event["subscriptions"];
-                for (auto it = subscriptions.begin(); it != subscriptions.end(); ++it) {
-                    if (it.key() == "user") {
-                        checkUserDataSequenceNumber(j["sequence_num"].get<uint64_t>());
-                    }
-                    else {
-                        checkMarketDataSequenceNumber(j["sequence_num"].get<uint64_t>());
-                    }
-                }
-            }
         }
         else if (channel == "heartbeat") {
             processHeartbeat(j);
         }
         else if (channel == "futures_balance_summary") {
-            checkUserDataSequenceNumber(j["sequence_num"]);
         }
         else {
             LOG_ERROR("unknown channel: {}", to_string(channel));
@@ -427,7 +450,7 @@ inline void WebSocketClient::reconnectMarketData() {
         market_data_url_,
         [this]() { LOG_INFO("Market data connected"); },
         [this]() { LOG_INFO("Market data disconnected"); },
-        [this](const char* data, std::size_t size) { onData(data, size); },
+        [this](const char* data, std::size_t size) { onMarketData(data, size); },
         [this](std::string err) { onMarketDataError(err); });
     last_md_seq_num_ = -1;
 }
@@ -438,7 +461,7 @@ inline void WebSocketClient::reconnectUserData() {
         user_data_url_,
         [this]() { LOG_INFO("User data connected"); },
         [this]() { LOG_INFO("User data disconnected"); },
-        [this](const char* data, std::size_t size) { onData(data, size); },
+        [this](const char* data, std::size_t size) { onUserData(data, size); },
         [this](std::string err) { onUserDataError(err); });
     last_user_seq_num_ = -1;
 }
